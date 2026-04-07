@@ -70,6 +70,19 @@ struct Args {
     #[arg(long, allow_hyphen_values = true)]
     nodata: Option<f32>,
 
+    /// Sample elevation at pixel corners instead of pixel centres.
+    ///
+    /// When enabled, pixel [0,0] is placed exactly at the tile's NW corner and
+    /// pixel [511,511] at the SE corner (spacing = tile_width / 511).  Adjacent
+    /// tiles then share their edge sample values, so tile boundaries are perfectly
+    /// seamless — compatible with ArcGIS tiled elevation services and 3-D terrain
+    /// renderers that require corner/grid registration.
+    ///
+    /// Without this flag the default behaviour (pixel centres, spacing =
+    /// tile_width / 512) matches rio-rgbify output.
+    #[arg(long)]
+    corner_sample: bool,
+
     /// Worker thread count (default: all CPUs)
     #[arg(short = 'j', long)]
     workers: Option<usize>,
@@ -166,6 +179,7 @@ fn main() -> Result<()> {
     let format = args.format;
     let compress = args.compress;
     let nodata = args.nodata;
+    let corner_sample = args.corner_sample;
     let mut n_written: u64 = 0;
     let mut n_errors: u64 = 0;
 
@@ -174,7 +188,7 @@ fn main() -> Result<()> {
         let chunk_results: Vec<Result<Option<Vec<u8>>>> = chunk
             .par_iter()
             .map(|&(z, x, y)| {
-                let r = process_tile(&input_str, z, x, y, bv, iv, rd, encoding, format, compress, nodata);
+                let r = process_tile(&input_str, z, x, y, bv, iv, rd, encoding, format, compress, nodata, corner_sample);
                 pb.inc(1);
                 r
             })

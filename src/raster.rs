@@ -9,7 +9,9 @@ use crate::encoder::{encode_mapbox, encode_terrarium, Encoding};
 use crate::tile_format::TileFormat;
 use crate::tile::{merc_to_wgs84, tile_bounds_3857, HALF_CIRC};
 
-/// Bilinear sample from a flat f32 buffer. Returns `nodata` if out of bounds.
+/// Tile width/height in pixels.
+pub const TILE_SIZE: usize = 512;
+
 pub fn sample_bilinear(
     data: &[f32],
     width: usize,
@@ -158,6 +160,7 @@ pub fn process_tile(
     format: TileFormat,
     compress: Option<u8>,
     nodata_override: Option<f32>,
+    corner_sample: bool,
 ) -> Result<Option<Vec<u8>>> {
     use gdal::raster::ResampleAlg;
 
@@ -248,9 +251,20 @@ pub fn process_tile(
         }
 
         // ── Build pixel coordinates and sample + encode ──────────────────────
-        const N: usize = 512 * 512;
-        let pw = (east_m - west_m) / 512.0;
-        let ph = (north_m - south_m) / 512.0;
+        // corner_sample=false (default): pixels are area-registered — sample at
+        //   pixel centres: spacing = tile_width / TILE_SIZE, offset = 0.5 pixel.
+        //   Matches rio-rgbify output.
+        // corner_sample=true: pixels are grid-registered — sample at pixel
+        //   corners: spacing = tile_width / (TILE_SIZE - 1), offset = 0 pixels.
+        //   Pixel [0] falls exactly on the tile's western / northern edge and
+        //   pixel [TILE_SIZE-1] on the eastern / southern edge, so adjacent tiles
+        //   share their boundary sample values → seamless terrain with ArcGIS /
+        //   3-D terrain renderers that require corner / grid registration.
+        const N: usize = TILE_SIZE * TILE_SIZE;
+        let steps = if corner_sample { (TILE_SIZE - 1) as f64 } else { TILE_SIZE as f64 };
+        let pixel_offset = if corner_sample { 0.0 } else { 0.5 };
+        let pw = (east_m - west_m) / steps;
+        let ph = (north_m - south_m) / steps;
 
         let mut rgb = vec![0u8; N * 3];
         let mut any_valid = false;
@@ -273,17 +287,17 @@ pub fn process_tile(
             let pi_over_hc = std::f64::consts::PI / HALF_CIRC;
 
             // Precompute per-column: Mercator x → lon → buffer pixel x
-            let mut bpx_col = [0.0f64; 512];
-            for col in 0..512usize {
-                let x_m = west_m + (col as f64 + 0.5) * pw;
+            let mut bpx_col = [0.0f64; TILE_SIZE];
+            for col in 0..TILE_SIZE {
+                let x_m = west_m + (col as f64 + pixel_offset) * pw;
                 let lon = x_m * deg_per_merc;
                 bpx_col[col] = lon * scale_x - off_x;
             }
 
             // Precompute per-row: Mercator y → lat → buffer pixel y
-            let mut bpy_row = [0.0f64; 512];
-            for row in 0..512usize {
-                let y_m = north_m - (row as f64 + 0.5) * ph;
+            let mut bpy_row = [0.0f64; TILE_SIZE];
+            for row in 0..TILE_SIZE {
+                let y_m = north_m - (row as f64 + pixel_offset) * ph;
                 let lat = (2.0 * (y_m * pi_over_hc).exp().atan()
                     - std::f64::consts::FRAC_PI_2)
                     .to_degrees();
@@ -291,10 +305,10 @@ pub fn process_tile(
             }
 
             // Fused sample + encode — no Vec allocations, no per-pixel trig
-            for row in 0..512usize {
+            for row in 0..TILE_SIZE {
                 let bpy = bpy_row[row];
-                let base = row * 512 * 3;
-                for col in 0..512usize {
+                let base = row * TILE_SIZE * 3;
+                for col in 0..TILE_SIZE {
                     let elev = sample_bilinear(src_data, bw, bh, bpx_col[col], bpy, nodata);
                     let c = match encoding {
                         Encoding::Mapbox => encode_mapbox(elev, base_val, interval, round, nodata),
@@ -310,13 +324,13 @@ pub fn process_tile(
                 }
             }
         } else {
-            // ── General path: full 262K coordinate transform ─────────────────
+            // ── General path: full coordinate transform ──────────────────────
             let mut px3 = Vec::with_capacity(N);
             let mut py3 = Vec::with_capacity(N);
-            for row in 0..512usize {
-                for col in 0..512usize {
-                    px3.push(west_m + (col as f64 + 0.5) * pw);
-                    py3.push(north_m - (row as f64 + 0.5) * ph);
+            for row in 0..TILE_SIZE {
+                for col in 0..TILE_SIZE {
+                    px3.push(west_m + (col as f64 + pixel_offset) * pw);
+                    py3.push(north_m - (row as f64 + pixel_offset) * ph);
                 }
             }
             cache
